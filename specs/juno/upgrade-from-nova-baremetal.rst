@@ -4,21 +4,16 @@
 
  http://creativecommons.org/licenses/by/3.0/legalcode
 
-==========================================
-Upgrade from a nova "baremetal" deployment
-==========================================
+====================================================
+Upgrade from a nova "baremetal" deployment to Ironic
+====================================================
 
 https://blueprints.launchpad.net/ironic/+spec/upgrade-from-nova-baremetal
 
 This specification describes the technical components required to perform
-an upgrade from a deployment of the nova.virt.baremetal driver to Ironic.
-It outlines the data migration path and service upgrade process.
-
-NOTE: The service upgrade is only supported within the same release version.
-For example, if this work is completed during the Juno cycle, an upgrade from
-"juno baremetal" to "juno ironic" will be supported, but a direct upgrade from
-"icehouse baremetal" to "juno ironic" will NOT be supported. That should be
-accomplished by first upgrading from "icehouse baremetal" to "juno baremetal."
+an upgrade from a deployment of the nova.virt.baremetal driver to the
+nova.virt.ironic driver. It outlines the data migration path and service
+upgrade process.
 
 Problem description
 ===================
@@ -33,68 +28,105 @@ It is unreasonable to expect operators who have chosen to use
 nova.virt.baremetal to lose all state and delete all instances during an
 upgrade. Thus, an upgrade path is being provided.
 
-The upgrade process should follow this path:
-* build ironic deploy ramdisk and load it in glance
-* start maintenance period (prevent tenant from creating new instances)
-* update flavor metadata in glance to reference new deploy kernel & ramdisk
-* create empty ironic database
-* migrate data from nova_bm -> ironic
-* start ironic services
-* observe ironic log files to ensure take over completed w/o errors
-* reconfigure and restart nova-compute service
-* end maintenance period
+NOTE: The service upgrade is only supported within the same release version,
+and will only be supported in the first integrated release containing Ironic.
+
+For example, if this work is completed during the Juno cycle, an upgrade from
+"juno baremetal" to "juno ironic" will be supported, but a direct upgrade from
+"icehouse baremetal" to "juno ironic" will NOT be supported. That should be
+accomplished by first upgrading from "icehouse baremetal" to "juno baremetal"
+and then to "juno ironic".
 
 Proposed change
 ===============
 
-* Add boolean field `nodes`.`legacy_baremetal` to database
+This proposal is to add the following to the Nova codebase:
 
-* Add data migration tool which will extract the current state from the
-  `nova_bm` database, and  convert it to Ironic's data structures and
-  populate the `ironic` database.
+* Add a data migration tool which will import both nova.virt.baremetal.db.api
+  and ironic.db.api, extract the current state from the nova_bm database,
+  convert it to Ironic's data structures and populate the `ironic` database.
 
 * Add a flavor update tool which will update the extra_specs of baremetal
   flavors to reference new ironic-appropriate deploy kernel & ramdisk.
 
 * Add process documentation aimed at deployers.
 
+Additionaly, one change will be made to Ironic to facilitate this:
+
+* Add boolean field `nodes`.`imported_from_nova_bm` to ironic database.
+
+At the end of the release cycle following the cycle in which this work is
+completed, all of the above will be removed from the code base. Additionally,
+the nova.virt.baremetal driver and all related artefacts (eg, the baremetal
+host manager) will be deleted from Nova.
+
+
+The proposed upgrade process should follow this path:
+
+* build ironic deploy ramdisk and load it in glance
+
+* start maintenance period (prevent tenant from creating new instances)
+
+* update flavor metadata in glance to reference new deploy kernel & ramdisk
+
+* create empty ironic database
+
+* migrate data from nova_bm -> ironic
+
+* start ironic services
+
+* observe ironic log files to ensure take over completed w/o errors
+
+* reconfigure and restart nova-compute service
+
+* end maintenance period
+
 Alternatives
 ------------
 
-One option is to not provide any upgrade path; this met with opposition from
-community leaders.
+Three alternatives have been discussed.
 
-Another option is to provide a data-only migration (eg, require that instances
-be deleted prior to, or as part of, the migration). This was also met with
-opposition.
+* Do not provide any upgrade path; this met with significant opposition.
+
+* Provide a data-only migration (eg, require that instances be deleted
+  prior to, or as part of, the migration). This was also met with opposition.
+
+* Rather than a database migration script, one could enroll instances
+  via Ironic's REST API. This would require the REST API to accept nodes
+  that have non-null provision_state and power_state, which it expressly
+  does not allow today. This change would require significant changes
+  to the provisioning API and state management within the conductor service.
 
 Data model impact
 -----------------
 
-This may require an extra field in the database to indicate nodes that were
-deployed by nova.virt.baremetal and imported into Ironic. This field should
-default to False, and should be set to False during both the tear_down and
-deploy methods. It should be set to True only by the data migration script.
+No data model impact in Nova.
 
-This field could be dropped from the database after one release.
+In Ironic, this will require an extra field in the database to indicate nodes
+that were deployed by nova.virt.baremetal and imported into Ironic. This field
+should default to False, and should be set to False during both the tear_down
+and deploy methods. It should be set to True only by the data migration script.
 
-Proposed name for the new field: legacy_baremetal
+This field could be dropped from the ironic database after one release.
+
+Proposed name for the new field: imported_from_nova_bm
 
 
 REST API impact
 ---------------
 
-Exposing the `nodes`.`legacy_baremetal` field on the /v1/nodes/XXX resource.
+None
 
 Driver API impact
 -----------------
 
-This does not require any unique changes to the driver API.
+None
 
 Nova driver impact
 ------------------
 
-None.
+Upon completion of this work, the nova.virt.baremetal driver should be marked
+deprecated and removed at the beginning of the following release.
 
 Security impact
 ---------------
@@ -124,8 +156,7 @@ None
 Developer impact
 ----------------
 
-The only way to ensure that developers do not break the upgrade-ability
-will be to create a grenade test that verifies the upgrade path.
+None
 
 
 Implementation
@@ -147,7 +178,7 @@ Work Items
 
 * Database migration script
 
-* Image update script
+* Flavor update script
 
 * Grenade tests
 
@@ -157,29 +188,44 @@ Work Items
 Dependencies
 ============
 
-This proposal depends on the capability of the ironic-conductor processes to
-"take over" an instance deployed by another conductor. This capability will
-be leveraged to allow ironic-conductor to take over instances deployed
-by nova-baremetal.
+This proposal depends primarily upon the acceptance of the
+nova.virt.ironic driver into the Nova codebase.
+
+It also depends on the capability of the ironic-conductor processes to "take
+over" an instance deployed by another conductor. This capability will be
+leveraged to allow ironic-conductor to take over instances deployed by
+nova-baremetal.
+
+It also depends on adding a new field to the ironic database to indicate
+nodes with active instances that were imported from Nova.
+
 
 Testing
 =======
 
 A Grenade test will need to be developed that can:
 
-* deploy an instance using nova-baremetal
-* update nova service config to use ironic
-* invoke both data migration and flavor update script
-* start ironic and restart nova-compute
+* deploy an instance using nova.virt.baremetal
+
+* update nova configuration to use the nova.virt.ironic driver
+
+* invoke both data migration and flavor update scripts
+
+* start ironic services and restart nova-compute
+
 * confirm ironic-conductor rebuilt the PXE environment by checking
   file system and/or log files
-* restart the instance and confirm that it PXE booted by SSH'ing into it
+
+* request that Nova restart the instance
+
+* confirm that Ironic restarted the instance and that it booted properly
 
 
 Documentation Impact
 ====================
 
 Upgrade documentation must be written and maintained for one release cycle.
+
 
 References
 ==========
